@@ -54,30 +54,47 @@ if real_data:
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, dropout=dropout)
+
+
+print(f"Resuming training from {out_dir}")
+# resume training from a checkpoint.
+ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+checkpoint = torch.load(ckpt_path, map_location=device)
+checkpoint_model_args = checkpoint['model_args']
+# force these config attributes to be equal otherwise we can't even resume training
+# the rest of the attributes (e.g. dropout) can stay as desired from command line
+for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    model_args[k] = checkpoint_model_args[k]
+# create the model
 gptconf = GPTConfig(**model_args)
 model = GPT(gptconf)
-model.to(device)
-
-optimizer = model.configure_optimizers(weight_decay=1e-2, learning_rate=1e-4, betas=(0.9, 0.95), device_type=device_type)
+state_dict = checkpoint['model']
+# fix the keys of the state dictionary :(
+# honestly no idea how checkpoints sometimes get this prefix, have to debug more
+unwanted_prefix = '_orig_mod.'
+for k,v in list(state_dict.items()):
+    if k.startswith(unwanted_prefix):
+        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+model.load_state_dict(state_dict)
 
 if compile:
     print("Compiling model...")
     model = torch.compile(model) # pytorch 2.0
-
+model = model.to(device)
 # simple benchmarking
 nlls = []
 
 torch.cuda.synchronize()
 
-for num_steps in trange(100): # burnin, then benchmark
+for num_steps in trange(100): 
     X, Y = get_batch()
-    
-    with ctx:
+    #print(X.device.type, Y.device.type) 
+    with torch.no_grad():
         logits, loss = model(X, Y)
         neg_log_likelihood = loss
     nlls.append(neg_log_likelihood.detach().cpu())
     torch.cuda.synchronize()
    
-print(torch.stack(nlls).mean())
+print(f"Average negative lock likelihood over 100 steps: {torch.stack(nlls).mean()}")
 perplexity = torch.exp(torch.stack(nlls).mean())
-print(perplexity.item())
+print(f"Perplexity: {perplexity.item()}")
